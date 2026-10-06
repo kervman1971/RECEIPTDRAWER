@@ -255,6 +255,12 @@ function cardEl(r){
   return el;
 }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function parsePriceLoose(s){ // "34,99" or "34.99" -> 34.99
+  let t = String(s).replace(/\s/g,'');
+  if(t.includes(',') && !t.includes('.')) t = t.replace(',','.');
+  const v = parseFloat(t);
+  return isNaN(v) ? 0 : v;
+}
 function dispDate(iso){ const [y,m,d]=iso.split('-').map(Number); return new Date(y,m-1,d).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}); }
 
 /* ============ add receipt: photo → OCR → form ============ */
@@ -391,11 +397,18 @@ async function preprocessForOCR(dataUrl){
   return c.toDataURL('image/png');
 }
 
-/* Heuristic parser for Winners-style thermal receipts */
+/* Heuristic parser for Winners-style thermal receipts (EN + FR-Quebec) */
 function parseReceipt(text){
   const lines = text.split('\n').map(l=>l.trim()).filter(l=>l.length>1);
   let date=null, total=null; const items=[];
-  const money = l => { const m = l.replace(/,/g,'').match(/\$?\s?(\d+\.\d{2})\s*$/); return m?Number(m[1]):null; };
+  // last 2-decimal number on the line wins; accepts 34.99 and 34,99
+  const money = l => {
+    // NB: keep spaces — they separate item codes ("062607 34,99") from prices
+    const ms = [...l.matchAll(/(\d+)[.,](\d{2})/g)];
+    if(!ms.length) return null;
+    const m = ms[ms.length-1];
+    return Number(m[1].replace(/,/g,'') + '.' + m[2]);
+  };
 
   for(const l of lines){
     if(!date){
@@ -408,17 +421,19 @@ function parseReceipt(text){
     }
   }
   let totalLine=-1;
-  lines.forEach((l,i)=>{ if(/grand\s*total|^total\b/i.test(l) && !/subtotal/i.test(l)){ totalLine=i; } });
+  lines.forEach((l,i)=>{ if(/grand\s*total|^total\b/i.test(l) && !/subtotal|sous-total/i.test(l)){ totalLine=i; } });
   if(totalLine>=0){ const v=money(lines[totalLine]); if(v!=null) total=v; }
   if(total==null){ // fallback: biggest amount on a total-ish line
     for(let i=lines.length-1;i>=0;i--){ if(/total|amount due|balance/i.test(lines[i])){ const v=money(lines[i]); if(v!=null){total=v;break;} } }
   }
-  const skip = /total|subtotal|tax|hst|gst|pst|qst|change|cash|debit|credit|visa|mastercard|balance|amount due|tender|winners|thank you|receipt|store #|transaction/i;
+  const skip = /total|sous-total|subtotal|tps|tvq|taxe|\btax\b|hst|gst|pst|qst|change|cash|d[eé]bit|credit|visa|mastercard|balance|solde|amount due|tender|winners|thank you|merci|receipt|re[uû]|store ?#|transaction|carte|gift|cadeau|gliss|swipe/i;
   lines.forEach((l,i)=>{
     if(i===totalLine || skip.test(l)) return;
+    if(totalLine>=0 && i>totalLine) return; // payment + footer live below the total
     const v=money(l);
     if(v!=null && v>0){
-      const name = l.replace(/\$?\s?\d+\.\d{2}\s*$/,'').replace(/^[\*\#\s]+/,'').trim();
+      let name = l.replace(/[\d.,]+\s*[$%]*\s*[A-Za-z%°]*\s*$/,'').trim();
+      name = name.replace(/^\d+\s*[-–—:]\s*/, '').replace(/\s+\d{4,}\s*$/, '').replace(/^[\*\#;©:\s]+/, '').trim();
       if(name.length>1) items.push({name: name.slice(0,40), price:v});
     }
   });
@@ -447,8 +462,8 @@ function learnAliases(items){
 $('saveBtn').addEventListener('click', ()=>{
   const date = $('fDate').value || new Date().toISOString().slice(0,10);
   const items = $('fItems').value.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{
-    const m = l.match(/^(.*?)[—\-–:]\s*\$?(\d+\.?\d*)\s*$/);
-    return m ? {name:m[1].trim().slice(0,60), price:Number(m[2])} : {name:l.slice(0,60), price:0};
+    const m = l.match(/^(.*?)[—\-–:]\s*\$?([\d.,]+)\s*$/);
+    return m ? {name:m[1].trim().slice(0,60), price:parsePriceLoose(m[2])} : {name:l.slice(0,60), price:0};
   });
   let total = parseFloat($('fTotal').value);
   if(!(total>0)) total = items.reduce((a,i)=>a+(Number(i.price)||0),0);
