@@ -25,7 +25,8 @@
   .style-toggle input{width:16px; height:16px;}
   main{max-width:640px; margin:0 auto; padding:14px 14px 90px;}
   #stats{display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:12px;}
-  .stat{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px 6px; text-align:center;}
+  .stat{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px 6px; text-align:center; cursor:pointer;}
+  .stat.active{border-color:var(--ink); background:#ececec;}
   .stat .v{font-size:17px; font-weight:700;}
   .stat .l{font-size:10.5px; color:var(--muted); margin-top:2px;}
   .toolbar{display:flex; gap:8px; margin-bottom:12px;}
@@ -82,10 +83,10 @@
 </header>
 <main>
   <section id="stats">
-    <div class="stat"><div class="v" id="stBought">$0</div><div class="l">Bought</div></div>
-    <div class="stat"><div class="v" id="stKept">$0</div><div class="l">Kept</div></div>
-    <div class="stat"><div class="v" id="stReturned">$0</div><div class="l">Returned</div></div>
-    <div class="stat"><div class="v" id="stPending">0</div><div class="l">Undecided</div></div>
+    <div class="stat" data-filter="bought"><div class="v" id="stBought">$0</div><div class="l">Bought</div></div>
+    <div class="stat" data-filter="keep"><div class="v" id="stKept">$0</div><div class="l">Kept</div></div>
+    <div class="stat" data-filter="returned"><div class="v" id="stReturned">$0</div><div class="l">Returned</div></div>
+    <div class="stat" data-filter="undecided"><div class="v" id="stPending">0</div><div class="l">Undecided</div></div>
   </section>
   <div class="toolbar">
     <input id="search" type="search" placeholder="Search items… (e.g. sweater)">
@@ -126,6 +127,7 @@ function loadState(){
   return { stylePlus:false, receipts:[] };
 }
 function saveState(){ localStorage.setItem(LS_KEY, JSON.stringify(state)); }
+let currentFilter = 'bought'; // bought=all, keep, returned, undecided
 const $ = id => document.getElementById(id);
 const fmt$ = n => '$' + (Number(n)||0).toFixed(2);
 
@@ -167,11 +169,25 @@ function render(){
   $('stPending').textContent = pending;
 
   const visible = state.receipts.filter(r=>{
-    if(!q) return true;
-    return r.items.some(it => (it.name||'').toLowerCase().includes(q));
+    if(q && !r.items.some(it => (it.name||'').toLowerCase().includes(q))) return false;
+    if(currentFilter==='keep') return r.status==='keep';
+    if(currentFilter==='returned') return r.status==='returned';
+    if(currentFilter==='undecided') return r.status==='undecided';
+    return true;
   });
+  document.querySelectorAll('.stat').forEach(s=>s.classList.toggle('active', s.dataset.filter===currentFilter));
   if(!visible.length){
-    list.innerHTML = '<div class="empty">No receipts yet.<br>Tap <b>＋ Add</b> and snap your first one.</div>';
+    const label = {keep:'kept', returned:'returned', undecided:'undecided'}[currentFilter];
+    list.innerHTML = label
+      ? `<div class="empty">Nothing marked as ${label} yet.</div>`
+      : '<div class="empty">No receipts yet.<br>Tap <b>＋ Add</b> and snap your first one.</div>';
+    return;
+  }
+  if(currentFilter!=='bought'){
+    const title = {keep:'Kept', returned:'Returned', undecided:'Undecided'}[currentFilter];
+    const sorted = visible.slice().sort((a,b)=> currentFilter==='returned' ? b.date.localeCompare(a.date) : daysLeft(a)-daysLeft(b));
+    const t=document.createElement('div'); t.className='section-title'; t.textContent=title; list.appendChild(t);
+    sorted.forEach(r=>list.appendChild(cardEl(r)));
     return;
   }
   const open = visible.filter(r=>r.status!=='returned').sort((a,b)=>daysLeft(a)-daysLeft(b));
@@ -251,6 +267,11 @@ $('cancelBtn').addEventListener('click', closeModal);
 $('modal').addEventListener('click', e=>{ if(e.target.id==='modal') closeModal(); });
 $('search').addEventListener('input', render);
 $('stylePlus').addEventListener('change', e=>{ state.stylePlus = e.target.checked; saveState(); render(); });
+document.querySelectorAll('.stat').forEach(s=>s.addEventListener('click',()=>{
+  const f = s.dataset.filter;
+  currentFilter = (currentFilter===f && f!=='bought') ? 'bought' : f;
+  render();
+}));
 
 $('photo').addEventListener('change', async e=>{
   const file = e.target.files[0]; if(!file) return;
