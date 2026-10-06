@@ -126,7 +126,9 @@ function loadState(){
   try{ const s = JSON.parse(localStorage.getItem(LS_KEY)); if(s && Array.isArray(s.receipts)) return s; }catch(e){}
   return { stylePlus:false, receipts:[] };
 }
-function saveState(){ localStorage.setItem(LS_KEY, JSON.stringify(state)); }
+function saveState(){
+  localStorage.setItem(LS_KEY, JSON.stringify(state)); // throws QuotaExceededError when full — caught on save
+}
 let currentFilter = 'bought'; // bought=all, keep, returned, undecided
 const $ = id => document.getElementById(id);
 const fmt$ = n => '$' + (Number(n)||0).toFixed(2);
@@ -275,24 +277,24 @@ document.querySelectorAll('.stat').forEach(s=>s.addEventListener('click',()=>{
 
 $('photo').addEventListener('change', async e=>{
   const file = e.target.files[0]; if(!file) return;
-  const dataUrl = await readAndShrink(file);
-  pendingPhoto = dataUrl;
-  const pv = $('preview'); pv.src = dataUrl; pv.style.display='block';
-  await runOCR(dataUrl);
+  const url = URL.createObjectURL(file);
+  try{
+    const img = await loadImage(url);
+    const dataUrl = await shrinkImage(img, 1400, 0.85); // full-size: OCR + preview
+    pendingPhoto = await shrinkImage(img, 480, 0.7);    // small thumbnail: what gets stored
+    const pv = $('preview'); pv.src = dataUrl; pv.style.display='block';
+    await runOCR(dataUrl);
+  }finally{ URL.revokeObjectURL(url); }
 });
-function readAndShrink(file){
-  return new Promise(res=>{
-    const img = new Image();
-    img.onload = ()=>{
-      const max = 1400, s = Math.min(1, max/Math.max(img.width,img.height));
-      const c = document.createElement('canvas');
-      c.width = Math.round(img.width*s); c.height = Math.round(img.height*s);
-      c.getContext('2d').drawImage(img,0,0,c.width,c.height);
-      res(c.toDataURL('image/jpeg',0.85));
-      URL.revokeObjectURL(img.src);
-    };
-    img.src = URL.createObjectURL(file);
-  });
+function loadImage(src){
+  return new Promise((res, rej)=>{ const img = new Image(); img.onload=()=>res(img); img.onerror=rej; img.src=src; });
+}
+function shrinkImage(img, max, quality){
+  const s = Math.min(1, max/Math.max(img.width, img.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(img.width*s); c.height = Math.round(img.height*s);
+  c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+  return c.toDataURL('image/jpeg', quality);
 }
 
 async function runOCR(dataUrl){
@@ -365,7 +367,13 @@ $('saveBtn').addEventListener('click', ()=>{
     photo: pendingPhoto, date, items, total: Math.round(total*100)/100,
     status:'undecided', refund:null, createdAt: Date.now()
   });
-  saveState(); closeModal(); render();
+  try{ saveState(); }
+  catch(e){
+    state.receipts.shift(); // roll back — storage is full
+    alert('Phone storage is full. Delete some old returned receipts to make room, then try again.');
+    return;
+  }
+  closeModal(); render();
   window.scrollTo({top:0, behavior:'smooth'});
 });
 
