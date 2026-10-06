@@ -100,10 +100,15 @@
   <div class="sheet">
     <h2>Add a receipt</h2>
     <p class="hint">1. Snap the receipt &nbsp;→&nbsp; 2. Check what the scanner read &nbsp;→&nbsp; 3. Save</p>
+    <p class="hint" style="margin-top:-8px;">Tip: lay the receipt flat, fill the frame, and avoid shadows — clean shots read far better.</p>
     <label>Receipt photo</label>
     <input type="file" id="photo" accept="image/*">
     <img id="preview" alt="">
     <div id="ocrStatus"></div>
+    <details id="ocrRaw" style="display:none; margin-top:8px;">
+      <summary style="font-size:13px; color:var(--muted); cursor:pointer;">What the scanner saw</summary>
+      <pre id="ocrRawText" style="font-size:11px; white-space:pre-wrap; background:#f7f7f7; padding:8px; border-radius:8px; max-height:160px; overflow:auto;"></pre>
+    </details>
     <label>Purchase date</label>
     <input type="date" id="fDate">
     <label>Items <span style="font-weight:400;color:var(--muted)">(one per line: name — price)</span></label>
@@ -123,8 +128,8 @@
 const LS_KEY = 'receiptDrawer.v1';
 let state = loadState();
 function loadState(){
-  try{ const s = JSON.parse(localStorage.getItem(LS_KEY)); if(s && Array.isArray(s.receipts)) return s; }catch(e){}
-  return { stylePlus:false, receipts:[] };
+  try{ const s = JSON.parse(localStorage.getItem(LS_KEY)); if(s && Array.isArray(s.receipts)){ if(!s.aliases) s.aliases={}; return s; } }catch(e){}
+  return { stylePlus:false, receipts:[], aliases:{} }; // aliases: raw scanner name -> her renamed name
 }
 function saveState(){
   localStorage.setItem(LS_KEY, JSON.stringify(state)); // throws QuotaExceededError when full — caught on save
@@ -254,13 +259,14 @@ function dispDate(iso){ const [y,m,d]=iso.split('-').map(Number); return new Dat
 
 /* ============ add receipt: photo → OCR → form ============ */
 let pendingPhoto = null;
+let pendingRaw = []; // raw OCR {name,price} lines for the current photo — used to learn name renames on save
 
 function openModal(){
   $('modal').classList.add('open');
   $('fDate').value = new Date().toISOString().slice(0,10);
   $('fItems').value=''; $('fTotal').value='';
-  $('preview').style.display='none'; $('ocrStatus').textContent='';
-  pendingPhoto = null; $('photo').value='';
+  $('preview').style.display='none'; $('ocrStatus').textContent=''; $('ocrRaw').style.display='none';
+  pendingPhoto = null; pendingRaw = []; $('photo').value='';
 }
 function closeModal(){ $('modal').classList.remove('open'); }
 
@@ -308,21 +314,81 @@ function webpOK(){
 
 async function runOCR(dataUrl){
   const st = $('ocrStatus');
+  const rawBox = $('ocrRaw'), rawText = $('ocrRawText');
   try{
+    if(typeof Tesseract === 'undefined'){
+      st.textContent = 'Scanner could not load — check your internet connection, or just type the items in yourself.';
+      return;
+    }
+    st.textContent = 'Cleaning up the photo…';
+    const clean = await preprocessForOCR(dataUrl);
     st.textContent = 'Reading receipt…';
-    const { data:{ text } } = await Tesseract.recognize(dataUrl, 'eng', {
-      logger: m => { if(m.status==='recognizing text') st.textContent = 'Reading receipt… ' + Math.round(m.progress*100) + '%'; }
+    const { data:{ text } } = await Tesseract.recognize(clean, 'eng', {
+      logger: m => { if(m.status==='recognizing text') st.textContent = 'Reading receipt… ' + Math.round(m.progress*100) + '%'; },
+      tessedit_pageseg_mode: '4', // single column of text — best for receipts
     });
+    const t = (text||'').trim();
+    rawBox.style.display = t ? 'block' : 'none';
+    rawText.textContent = t;
     const p = parseReceipt(text);
     if(p.date) $('fDate').value = p.date;
-    if(p.items.length) $('fItems').value = p.items.map(i=>`${i.name} — ${Number(i.price).toFixed(2)}`).join('\n');
+    pendingRaw = p.items;
+    let remembered = 0;
+    if(p.items.length) $('fItems').value = p.items.map(i=>{
+      const known = state.aliases[i.name];
+      if(known) remembered++;
+      return `${known || i.name} — ${Number(i.price).toFixed(2)}`;
+    }).join('\n');
     if(p.total!=null) $('fTotal').value = p.total.toFixed(2);
-    st.textContent = p.total!=null || p.date
-      ? 'Check what the scanner read — fix anything it got wrong, then save.'
-      : 'Couldn’t read much — just type the items in yourself.';
+    st.textContent = (p.total!=null || p.date || p.items.length)
+      ? 'Check what the scanner read — fix anything it got wrong, then save.' +
+        (remembered ? ` (${remembered} name${remembered>1?'s':''} you set before filled in — change it and I’ll remember the new one.)` : '')
+      : 'Couldn’t read much from this photo — try a flatter, brighter shot, or type the items in yourself.';
   }catch(err){
     st.textContent = 'Scanner hiccup — just type the items in yourself.';
   }
+}
+
+/* Cleanup pass before OCR: grayscale + Otsu binarization.
+   Thermal receipts are low-contrast; pure black-and-white reads far better. */
+async function preprocessForOCR(dataUrl){
+  const img = await loadImage(dataUrl);
+  const w = img.width, h = img.height;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, w, h);
+  const imgData = ctx.getImageData(0, 0, w, h);
+  const px = imgData.data, n = w*h;
+  const gray = new Uint8Array(n), hist = new Array(256).fill(0);
+  for(let i=0;i<n;i++){
+    const g = ((px[i*4]*299 + px[i*4+1]*587 + px[i*4+2]*114 + 500)/1000)|0;
+    gray[i]=g; hist[g]++;
+  }
+  // Otsu: threshold that best separates dark text from light paper
+  let sum=0; for(let t=0;t<256;t++) sum+=t*hist[t];
+  let sumB=0, wB=0, best=-1, thr=128;
+  for(let t=0;t<256;t++){
+    wB+=hist[t]; if(wB===0) continue;
+    const wF=n-wB; if(wF===0) break;
+    sumB+=t*hist[t];
+    const mB=sumB/wB, mF=(sum-sumB)/wF, d=mB-mF;
+    const between=wB*wF*d*d;
+    if(between>best){ best=between; thr=t; }
+  }
+  let darkCount=0;
+  for(let i=0;i<n;i++){
+    const isDark = gray[i] <= thr;
+    if(isDark) darkCount++;
+    const v = isDark ? 0 : 255;
+    px[i*4]=px[i*4+1]=px[i*4+2]=v; px[i*4+3]=255;
+  }
+  // text should be the minority: if most of the frame went dark, flip it
+  if(darkCount > n*0.6){
+    for(let i=0;i<n;i++){ const v = px[i*4]===0 ? 255 : 0; px[i*4]=px[i*4+1]=px[i*4+2]=v; }
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return c.toDataURL('image/png');
 }
 
 /* Heuristic parser for Winners-style thermal receipts */
@@ -362,6 +428,22 @@ function parseReceipt(text){
   return { date, total, items: items.slice(0,30) };
 }
 
+/* Name memory: rename a scanner name once ("MNS WVN SHRT" -> "blue shirt") and
+   the app fills in her name next time the scanner sees that line. Learns by
+   matching each saved line back to the raw OCR line with the same price. */
+function learnAliases(items){
+  const pool = pendingRaw.slice(); // each {name, price}
+  for(const it of items){
+    const k = pool.findIndex(r => Math.abs(r.price - (Number(it.price)||0)) < 0.005);
+    if(k < 0) continue;
+    const raw = pool.splice(k,1)[0].name;
+    const name = (it.name||'').trim().slice(0,60);
+    if(!raw.trim() || !name) continue;
+    if(name === raw) delete state.aliases[raw]; // typed the scanner text back — forget the rename
+    else state.aliases[raw] = name;
+  }
+}
+
 $('saveBtn').addEventListener('click', ()=>{
   const date = $('fDate').value || new Date().toISOString().slice(0,10);
   const items = $('fItems').value.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{
@@ -371,6 +453,7 @@ $('saveBtn').addEventListener('click', ()=>{
   let total = parseFloat($('fTotal').value);
   if(!(total>0)) total = items.reduce((a,i)=>a+(Number(i.price)||0),0);
   if(!items.length && !(total>0)){ alert('Add at least an item or a total.'); return; }
+  learnAliases(items); // remember any renames before persisting
   state.receipts.unshift({
     id: 'r'+Date.now().toString(36),
     photo: pendingPhoto, date, items, total: Math.round(total*100)/100,
