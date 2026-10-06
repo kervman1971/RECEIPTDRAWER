@@ -281,7 +281,7 @@ $('photo').addEventListener('change', async e=>{
   try{
     const img = await loadImage(url);
     const dataUrl = await shrinkImage(img, 1400, 0.85); // full-size: OCR + preview
-    pendingPhoto = await shrinkImage(img, 480, 0.7);    // small thumbnail: what gets stored
+    pendingPhoto = await shrinkImage(img, 320, 0.6, true); // tiny WebP thumbnail: what gets stored
     const pv = $('preview'); pv.src = dataUrl; pv.style.display='block';
     await runOCR(dataUrl);
   }finally{ URL.revokeObjectURL(url); }
@@ -289,12 +289,21 @@ $('photo').addEventListener('change', async e=>{
 function loadImage(src){
   return new Promise((res, rej)=>{ const img = new Image(); img.onload=()=>res(img); img.onerror=rej; img.src=src; });
 }
-function shrinkImage(img, max, quality){
+function shrinkImage(img, max, quality, preferWebp){
   const s = Math.min(1, max/Math.max(img.width, img.height));
   const c = document.createElement('canvas');
   c.width = Math.round(img.width*s); c.height = Math.round(img.height*s);
   c.getContext('2d').drawImage(img,0,0,c.width,c.height);
-  return c.toDataURL('image/jpeg', quality);
+  const type = (preferWebp && webpOK()) ? 'image/webp' : 'image/jpeg';
+  return c.toDataURL(type, quality);
+}
+let _webpOK = null;
+function webpOK(){
+  if(_webpOK===null){
+    try{ _webpOK = document.createElement('canvas').toDataURL('image/webp').indexOf('data:image/webp')===0; }
+    catch(e){ _webpOK = false; }
+  }
+  return _webpOK;
 }
 
 async function runOCR(dataUrl){
